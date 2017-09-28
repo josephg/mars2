@@ -1,6 +1,7 @@
 const lmdb = require('node-lmdb')
 const fs = require('fs')
-const rack = require('hat').rack(64)
+const hat = require('hat')
+const assert = require('assert')
 
 const env = exports.env = new lmdb.Env()
 
@@ -22,17 +23,18 @@ const db = exports.db = env.openDbi({name: 'data', create: true})
 //   return ret
 // }
 
-const get = exports.get = (key) => {
-  const txn = env.beginTxn({readOnly:true})
+const get = exports.get = (key, txn = null) => {
+  const shouldClose = txn == null ? (txn = env.beginTxn({readOnly:true}), true) : false
   const data = txn.getString(db, key)
-  txn.commit()
+  if (shouldClose) txn.commit()
   return data != null ? JSON.parse(data) : data
 }
 
-const put = exports.put = (key, val) => {
-  const txn = env.beginTxn()
-  const data = txn.putString(db, key, JSON.stringify(val))
-  txn.commit()
+const put = exports.put = (key, val, txn = null) => {
+  console.log('put', !!txn)
+  const shouldClose = txn == null ? (txn = env.beginTxn(), true) : false
+  txn.putString(db, key, JSON.stringify(val))
+  if (shouldClose) txn.commit()
 }
 
 const del = (key) => {
@@ -42,15 +44,15 @@ const del = (key) => {
   txn.commit()
 }
 
-exports.getGame = id => get(`/games/${id}`)
-const saveGame = game => put(`/games/${game.id}`, game)
+const getGame = exports.getGame = (id, txn) => get(`/games/${id}`, txn)
+const saveGame = (game, txn) => put(`/games/${game.id}`, game, txn)
 
 const {type} = require('ot-json1')
 const gameListeners = new Map()
-const updateGame = exports.updateGame = (game, op) => {
+const updateGame = exports.updateGame = (game, op, txn) => {
   game = type.apply(game, op)
   game._v++
-  saveGame(game)
+  saveGame(game, txn)
   console.log('game is now', game)
 
   const listeners = gameListeners.get(game.id)
@@ -77,45 +79,117 @@ const saveUser = exports.saveUser = user => {
   put(`/users/${user.email}`, user)
 }
 
+const putTimer = (txn, timer, prevState) => {
+  // State should be 'pending', 'complete' or 'errored'.
+  assert(timer.type)
+  assert(timer.runAt)
+  if (!timer.state) timer.state = 'pending'
+  if (!timer.id) timer.id = `${timer.runAt}-${hat(16)}`
+
+  if (prevState) txn.del(db, `/timers/${prevState}/${timer.id}`)
+  txn.putString(db, `/timers/${timer.state}/${timer.id}`, JSON.stringify(timer))
+}
+
+const saveTimer = (timer) => {
+  const txn = env.beginTxn()
+  putTimer(txn, timer)
+  txn.commit()
+}
+
+const addWork = (game, wi) => {
+  // I'm going to reuse the timer id as the workitem id, because I'm lazy.
+  const timer = {
+    type: 'workitem',
+    runAt: wi.runAt,
+    gameId: game.id,
+  }
+  const txn = env.beginTxn()
+  putTimer(txn, timer)
+  updateGame(game, ['work', timer.id, {i:wi}], txn)
+  txn.commit()
+}
 
 {
   const game = {
-    id: 'thegameid',
-    work: [
-      {label: 'work work', completeAt: Date.now() + 5000, complete: false}
-    ],
+    id: hat(),
+    work: {},
     _v: 0,
   }
 
   saveGame(game)
+
+  addWork(game, {title:'yo yo', state:'pending', runAt: Date.now() + 3000})
 
   const users = [{
     name: 'Seph',
     email: 'me@josephg.com',
     admin: true,
     state: 'rad',
-    currentGame: 'thegameid'
+    currentGame: game.id
   }]
 
   users.forEach(saveUser)
 }
 
-// Load all the games and make timers for work
-const eachGame = fn => {
-  const txn = env.beginTxn({readOnly:true})
-  const cursor = new lmdb.Cursor(txn, db)
-  for (let key = cursor.goToRange('/games/'); key != null && key.startsWith('/games/'); key = cursor.goToNext()) {
-    const val = cursor.getCurrentString()
-    const game = JSON.parse(val)
-    fn(game)
+
+
+
+// Timers
+
+const runTimer = (txn, timer) => {
+  console.log('timer fired', timer)
+  switch (timer.type) {
+    case 'workitem': {
+      const game = getGame(timer.gameId)
+      if (game.work[timer.id] == null) {
+        // This shouldn't happen normally, but its really annoying so discard it when it happens.
+        console.error('Work item no longer exists in game')
+        break
+      }
+      // console.log('completing work item', game.work[timer.id])
+      updateGame(game, ['work', timer.id, 'state', {r:true, i:'complete'}], txn)
+      break
+    }
+    default: {
+      throw Error('Unknown timer type ' + timer.type)
+    }
   }
 }
 
-eachGame(game => {
-  game.work.forEach((wu, i) => {
-    setTimeout(() => {
-      console.log('game', game)
-      updateGame(game, ['work', i, 'complete', {r:1, i:true}])
-    }, wu.completeAt - Date.now())
-  })
+const eachPrefix = exports.eachPrefix = (prefix, fn) => {
+  const txn = env.beginTxn({readOnly:true})
+  const cursor = new lmdb.Cursor(txn, db)
+  for (let key = cursor.goToRange(prefix); key != null && key.startsWith(prefix); key = cursor.goToNext()) {
+    const val = cursor.getCurrentString()
+    fn(JSON.parse(val))
+  }
+  txn.commit()
+}
+
+const tryRunTimer = timer => {
+  const txn = env.beginTxn()
+  const prevState = timer.state
+  try {
+    runTimer(txn, timer)
+    timer.state = 'complete'
+  } catch (e) {
+    console.error('ERROR: Timer failed:', e)
+    timer.state = 'errored'
+    timer.error = e.stack
+  }
+  putTimer(txn, timer, prevState)
+  txn.commit()
+}
+
+// When the server restarts, retry all the errored timers
+eachPrefix('/timers/errored/', timer => {
+  tryRunTimer(timer)
+})
+
+eachPrefix('/timers/pending/', timer => {
+  if (timer.state === 'complete') return
+
+  setTimeout(() => {
+    tryRunTimer(timer)
+  }, timer.runAt - Date.now())
 })

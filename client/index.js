@@ -8,16 +8,18 @@ const app = choo()
 
 app.use(require('choo-log')())
 
+const objMap = (obj, fn) => Object.keys(obj).sort().map(k => fn(obj[k], k))
+
 const Work = (wu) => html`
   <div>
-    Work unit ${wu.label} ${wu.complete ? 'complete' : null}
+    Work unit ${wu.title} ${wu.state === 'complete' ? 'complete' : null}
   </div>
 
 `
 
 const MainView = game => html`
 <div>
-  ${game.work.map(Work)}
+  ${objMap(game.work, Work)}
 </div>`
 
 // const connectedClass = css`

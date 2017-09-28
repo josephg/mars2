@@ -3,6 +3,16 @@ const lmdb = require('node-lmdb')
 
 const cb = (callback, ...args) => process.nextTick(() => callback.apply(null, args))
 
+const eachPrefix = (env, db, prefix, fn) => {
+  const txn = env.beginTxn({readOnly:true})
+  const cursor = new lmdb.Cursor(txn, db)
+  for (let key = cursor.goToRange(prefix); key != null && key.startsWith(prefix); key = cursor.goToNext()) {
+    const val = cursor.getCurrentString()
+    fn(JSON.parse(val))
+  }
+  txn.commit()
+}
+
 module.exports = (session) => {
   class LMDBSession extends session.Store {
     constructor(env, dbi) {
@@ -30,26 +40,10 @@ module.exports = (session) => {
     // destroy.
 
     length(callback) {
-      const txn = this.env.beginTxn({readOnly:true})
-      const cursor = new lmdb.Cursor(txn, this.dbi)
-      const prefix = this.key('')
-      cursor.goToKey(prefix)
       let count = 0
-
-      while (true) {
-        // End of db.
-        if (cursor.goToNext() == null) break
-
-        let done = false
-        cursor.getCurrentString((key, val) => {
-          // End of sessions.
-          if (!s.startsWith(prefix)) done = true
-          else count++
-        })
-        if (done) break
-      }
-
-      txn.commit()
+      eachPrefix(this.env, this.dbi, this.key(''), (session) => {
+        count++
+      })
       return count
     }
 
