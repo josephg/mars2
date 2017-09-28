@@ -31,7 +31,6 @@ const get = exports.get = (key, txn = null) => {
 }
 
 const put = exports.put = (key, val, txn = null) => {
-  console.log('put', !!txn)
   const shouldClose = txn == null ? (txn = env.beginTxn(), true) : false
   txn.putString(db, key, JSON.stringify(val))
   if (shouldClose) txn.commit()
@@ -44,7 +43,7 @@ const del = (key) => {
   txn.commit()
 }
 
-const getGame = exports.getGame = (id, txn) => get(`/games/${id}`, txn)
+const getGame = exports.getGame = (gameId, txn) => get(`/games/${gameId}`, txn)
 const saveGame = (game, txn) => put(`/games/${game.id}`, game, txn)
 
 const {type} = require('ot-json1')
@@ -53,11 +52,10 @@ const updateGame = exports.updateGame = (game, op, txn) => {
   game = type.apply(game, op)
   game._v++
   saveGame(game, txn)
-  console.log('game is now', game)
+  // console.log('game is now', game)
 
   const listeners = gameListeners.get(game.id)
   if (listeners) listeners.forEach(l => {
-    console.log('l')
     l(game, op)
   })
 }
@@ -79,6 +77,9 @@ const saveUser = exports.saveUser = user => {
   put(`/users/${user.email}`, user)
 }
 
+
+// Timers
+
 const putTimer = (txn, timer, prevState) => {
   // State should be 'pending', 'complete' or 'errored'.
   assert(timer.type)
@@ -96,48 +97,27 @@ const saveTimer = (timer) => {
   txn.commit()
 }
 
-const addWork = (game, wi) => {
+const addWork = (gameId, work) => {
+  assert(work.title)
+  assert(work.runAt)
+  if (!work.state) work.state = 'pending'
+  if (!work.startedAt) work.startedAt = Date.now()
+
   // I'm going to reuse the timer id as the workitem id, because I'm lazy.
   const timer = {
     type: 'workitem',
-    runAt: wi.runAt,
-    gameId: game.id,
+    runAt: work.runAt,
+    gameId: gameId,
   }
   const txn = env.beginTxn()
   putTimer(txn, timer)
-  updateGame(game, ['work', timer.id, {i:wi}], txn)
+  const game = getGame(gameId, txn)
+  updateGame(game, ['work', timer.id, {i:work}], txn)
   txn.commit()
 }
 
-{
-  const game = {
-    id: hat(),
-    work: {},
-    _v: 0,
-  }
-
-  saveGame(game)
-
-  addWork(game, {title:'yo yo', state:'pending', runAt: Date.now() + 3000})
-
-  const users = [{
-    name: 'Seph',
-    email: 'me@josephg.com',
-    admin: true,
-    state: 'rad',
-    currentGame: game.id
-  }]
-
-  users.forEach(saveUser)
-}
-
-
-
-
-// Timers
-
 const runTimer = (txn, timer) => {
-  console.log('timer fired', timer)
+  console.log('timer fired', timer.type, timer.id)
   switch (timer.type) {
     case 'workitem': {
       const game = getGame(timer.gameId)
@@ -181,15 +161,45 @@ const tryRunTimer = timer => {
   txn.commit()
 }
 
-// When the server restarts, retry all the errored timers
-eachPrefix('/timers/errored/', timer => {
-  tryRunTimer(timer)
-})
 
-eachPrefix('/timers/pending/', timer => {
-  if (timer.state === 'complete') return
+{
+  const game = {
+    id: hat(),
+    work: {},
+    _v: 0,
+  }
 
-  setTimeout(() => {
+  saveGame(game)
+
+  addWork(game.id, {title:'eat bacon', runAt: Date.now() + Math.random() * 20000})
+  addWork(game.id, {title:'go swimming', runAt: Date.now() + Math.random() * 20000})
+  addWork(game.id, {title:'do taxes', runAt: Date.now() + Math.random() * 20000})
+  addWork(game.id, {title:'icecream', runAt: Date.now() + Math.random() * 20000})
+  // console.log('game', getGame(game.id))
+
+  const users = [{
+    name: 'Seph',
+    email: 'me@josephg.com',
+    admin: true,
+    state: 'rad',
+    currentGame: game.id
+  }]
+
+  users.forEach(saveUser)
+}
+
+
+{
+  // When the server starts, retry all the errored timers
+  eachPrefix('/timers/errored/', timer => {
     tryRunTimer(timer)
-  }, timer.runAt - Date.now())
-})
+  })
+
+  eachPrefix('/timers/pending/', timer => {
+    if (timer.state === 'complete') return
+
+    setTimeout(() => {
+      tryRunTimer(timer)
+    }, timer.runAt - Date.now())
+  })
+}
