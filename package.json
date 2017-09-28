@@ -1,0 +1,29 @@
+{
+  "name": "mars",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "body-parser": "^1.18.2",
+    "choo": "^6.1.0",
+    "choo-log": "^7.2.1",
+    "css-extract": "^1.2.0",
+    "csurf": "^1.9.0",
+    "express": "^4.15.5",
+    "express-graphql": "^0.6.11",
+    "express-session": "^1.15.6",
+    "graphql": "^0.11.4",
+    "hat": "^0.0.3",
+    "jsesc": "^2.5.1",
+    "nanorouter": "^2.1.0",
+    "node-lmdb": "^0.4.13",
+    "sheetify": "^6.2.0",
+    "unassertify": "^2.0.4",
+    "ws": "^3.2.0",
+    "yo-yoify": "^3.7.3"
+  },
+  "scripts": {
+    "build": "browserify client/index.js -t [ sheetify ] -p [ css-extract -o public/bundle.css ] -g unassertify -g yo-yoify -o public/bundle.js",
+    "watch": "watchify client/index.js -t [ sheetify ] -p [ css-extract -o public/bundle.css ] -g unassertify -g yo-yoify -o public/bundle.js -v"
+  }
+}
